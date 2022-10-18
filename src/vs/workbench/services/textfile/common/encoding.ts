@@ -472,7 +472,7 @@ export function detectEncodingFromBuffer({ buffer, bytesRead }: IReadResult, aut
 			if (!seemsBinary) {
 				//alert(guessedEncoding);
 				if (guessedEncoding !== 'utf8') {
-					guessedEncoding = 'windows1251';
+					guessedEncoding = 'windows1252';
 				}
 			}
 			return {
