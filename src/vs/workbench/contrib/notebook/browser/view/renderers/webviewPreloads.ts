@@ -69,6 +69,7 @@ interface PreloadContext {
 	readonly style: PreloadStyles;
 	readonly options: PreloadOptions;
 	readonly rendererData: readonly webviewMessages.RendererMetadata[];
+	readonly staticPreloadsData: readonly webviewMessages.StaticPreloadMetadata[];
 	readonly isWorkspaceTrusted: boolean;
 	readonly lineLimit: number;
 }
@@ -199,7 +200,7 @@ async function webviewPreloads(ctx: PreloadContext) {
 		}
 	};
 
-	async function loadScriptSource(url: string, originalUri = url): Promise<string> {
+	async function loadScriptSource(url: string, originalUri: string): Promise<string> {
 		const res = await fetch(url);
 		const text = await res.text();
 		if (!res.ok) {
@@ -246,17 +247,16 @@ async function webviewPreloads(ctx: PreloadContext) {
 		return new Function(...args.map(([k]) => k), functionSrc)(...args.map(([, v]) => v));
 	};
 
-	const runKernelPreload = async (url: string, originalUri: string): Promise<void> => {
+	async function runKernelPreload(url: string, originalUri: string, forceLoadAsModule: boolean): Promise<void> {
+		if (forceLoadAsModule) {
+			return activateModuleKernelPreload(url);
+		}
+
 		const text = await loadScriptSource(url, originalUri);
 		const isModule = /\bexport\b.*\bactivate\b/.test(text);
 		try {
 			if (isModule) {
-				const module: KernelPreloadModule = await __import(url);
-				if (!module.activate) {
-					console.error(`Notebook preload (${url}) looks like a module but does not export an activate function`);
-					return;
-				}
-				return module.activate(createKernelContext());
+				return activateModuleKernelPreload(url);
 			} else {
 				return invokeSourceWithGlobals(text, { ...kernelPreloadGlobals, scriptUrl: url });
 			}
@@ -264,7 +264,16 @@ async function webviewPreloads(ctx: PreloadContext) {
 			console.error(e);
 			throw e;
 		}
-	};
+	}
+
+	async function activateModuleKernelPreload(url: string) {
+		const module: KernelPreloadModule = await __import(url);
+		if (!module.activate) {
+			console.error(`Notebook preload '${url}' was expected to be a module but it does not export an 'activate' function`);
+			return;
+		}
+		return module.activate(createKernelContext());
+	}
 
 	const dimensionUpdater = new class {
 		private readonly pending = new Map<string, webviewMessages.DimensionUpdate>();
@@ -1140,7 +1149,7 @@ async function webviewPreloads(ctx: PreloadContext) {
 			case 'preload': {
 				const resources = event.data.resources;
 				for (const { uri, originalUri } of resources) {
-					kernelPreloads.load(uri, originalUri);
+					kernelPreloads.load(uri, originalUri, false);
 				}
 				break;
 			}
@@ -1305,10 +1314,7 @@ async function webviewPreloads(ctx: PreloadContext) {
 		}
 
 		private load(): Promise<rendererApi.RendererApi | undefined> {
-			if (!this._loadPromise) {
-				this._loadPromise = this._load();
-			}
-
+			this._loadPromise ??= this._load();
 			return this._loadPromise;
 		}
 
@@ -1360,9 +1366,9 @@ async function webviewPreloads(ctx: PreloadContext) {
 		 * @param uri URI to load from
 		 * @param originalUri URI to show in an error message if the preload is invalid.
 		 */
-		public load(uri: string, originalUri: string) {
+		public load(uri: string, originalUri: string, forceLoadAsModule: boolean) {
 			const promise = Promise.all([
-				runKernelPreload(uri, originalUri),
+				runKernelPreload(uri, originalUri, forceLoadAsModule),
 				this.waitForAllCurrent(),
 			]);
 
@@ -2126,6 +2132,10 @@ async function webviewPreloads(ctx: PreloadContext) {
 		type: 'initialized'
 	});
 
+	for (const preload of ctx.staticPreloadsData) {
+		kernelPreloads.load(preload.entrypoint, preload.entrypoint, true);
+	}
+
 	function postNotebookMessage<T extends webviewMessages.FromWebviewMessage>(
 		type: T['type'],
 		properties: Omit<T, '__vscode_notebook_message' | 'type'>
@@ -2355,11 +2365,12 @@ async function webviewPreloads(ctx: PreloadContext) {
 	}();
 }
 
-export function preloadsScriptStr(styleValues: PreloadStyles, options: PreloadOptions, renderers: readonly webviewMessages.RendererMetadata[], isWorkspaceTrusted: boolean, lineLimit: number, nonce: string) {
+export function preloadsScriptStr(styleValues: PreloadStyles, options: PreloadOptions, renderers: readonly webviewMessages.RendererMetadata[], preloads: readonly webviewMessages.StaticPreloadMetadata[], isWorkspaceTrusted: boolean, lineLimit: number, nonce: string) {
 	const ctx: PreloadContext = {
 		style: styleValues,
 		options,
 		rendererData: renderers,
+		staticPreloadsData: preloads,
 		isWorkspaceTrusted,
 		lineLimit,
 		nonce,

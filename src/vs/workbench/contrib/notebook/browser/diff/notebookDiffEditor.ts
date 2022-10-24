@@ -15,7 +15,7 @@ import { NotebookDiffEditorInput } from '../../common/notebookDiffEditorInput';
 import { CancellationToken, CancellationTokenSource } from 'vs/base/common/cancellation';
 import { DiffElementViewModelBase, SideBySideDiffElementViewModel, SingleSideDiffElementViewModel } from 'vs/workbench/contrib/notebook/browser/diff/diffElementViewModel';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
-import { CellDiffSideBySideRenderer, CellDiffSingleSideRenderer, NotebookCellTextDiffListDelegate, NotebookTextDiffList } from 'vs/workbench/contrib/notebook/browser/diff/notebookTextDiffList';
+import { CellDiffSideBySideRenderer, CellDiffSingleSideRenderer, NotebookCellTextDiffListDelegate, NotebookTextDiffList } from 'vs/workbench/contrib/notebook/browser/diff/notebookDiffList';
 import { IContextKeyService } from 'vs/platform/contextkey/common/contextkey';
 import { diffDiagonalFill, diffInserted, diffRemoved, editorBackground, focusBorder, foreground } from 'vs/platform/theme/common/colorRegistry';
 import { INotebookEditorWorkerService } from 'vs/workbench/contrib/notebook/common/services/notebookWorkerService';
@@ -410,11 +410,11 @@ export class NotebookTextDiffEditor extends EditorPane implements INotebookTextD
 			}
 		}));
 
-		await this._createOriginalWebview(generateUuid(), this._model.original.resource);
+		await this._createOriginalWebview(generateUuid(), this._model.original.viewType, this._model.original.resource);
 		if (this._originalWebview) {
 			this._modifiedResourceDisposableStore.add(this._originalWebview);
 		}
-		await this._createModifiedWebview(generateUuid(), this._model.modified.resource);
+		await this._createModifiedWebview(generateUuid(), this._model.modified.viewType, this._model.modified.resource);
 		if (this._modifiedWebview) {
 			this._modifiedResourceDisposableStore.add(this._modifiedWebview);
 		}
@@ -466,10 +466,10 @@ export class NotebookTextDiffEditor extends EditorPane implements INotebookTextD
 		}));
 	}
 
-	private async _createModifiedWebview(id: string, resource: URI): Promise<void> {
+	private async _createModifiedWebview(id: string, viewType: string, resource: URI): Promise<void> {
 		this._modifiedWebview?.dispose();
 
-		this._modifiedWebview = this.instantiationService.createInstance(BackLayerWebView, this, id, resource, {
+		this._modifiedWebview = this.instantiationService.createInstance(BackLayerWebView, this, id, viewType, resource, {
 			...this._notebookOptions.computeDiffWebviewOptions(),
 			fontFamily: this._generateFontFamily()
 		}, undefined) as BackLayerWebView<IDiffCellInfo>;
@@ -483,10 +483,10 @@ export class NotebookTextDiffEditor extends EditorPane implements INotebookTextD
 		return this._fontInfo?.fontFamily ?? `"SF Mono", Monaco, Menlo, Consolas, "Ubuntu Mono", "Liberation Mono", "DejaVu Sans Mono", "Courier New", monospace`;
 	}
 
-	private async _createOriginalWebview(id: string, resource: URI): Promise<void> {
+	private async _createOriginalWebview(id: string, viewType: string, resource: URI): Promise<void> {
 		this._originalWebview?.dispose();
 
-		this._originalWebview = this.instantiationService.createInstance(BackLayerWebView, this, id, resource, {
+		this._originalWebview = this.instantiationService.createInstance(BackLayerWebView, this, id, viewType, resource, {
 			...this._notebookOptions.computeDiffWebviewOptions(),
 			fontFamily: this._generateFontFamily()
 		}, undefined) as BackLayerWebView<IDiffCellInfo>;
