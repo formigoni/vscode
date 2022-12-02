@@ -468,6 +468,13 @@ export function detectEncodingFromBuffer({ buffer, bytesRead }: IReadResult, aut
 	// Auto guess encoding if configured
 	if (autoGuessEncoding && !seemsBinary && !encoding && buffer) {
 		return guessEncodingByBuffer(buffer.slice(0, bytesRead)).then(guessedEncoding => {
+			// O if abaixo eh uma customizacao para que tudo que nao for utf8 seja interpretado como windows1252
+			if (!seemsBinary) {
+				//alert(guessedEncoding);
+				if (guessedEncoding !== 'utf8') {
+					guessedEncoding = 'windows1252';
+				}
+			}
 			return {
 				seemsBinary: false,
 				encoding: guessedEncoding
