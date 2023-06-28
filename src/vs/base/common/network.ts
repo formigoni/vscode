@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import * as errors from 'vs/base/common/errors';
 import * as platform from 'vs/base/common/platform';
 import { URI } from 'vs/base/common/uri';
 
@@ -52,17 +53,15 @@ export namespace Schemas {
 
 	export const vscodeRemoteResource = 'vscode-remote-resource';
 
+	export const vscodeManagedRemoteResource = 'vscode-managed-remote-resource';
+
 	export const vscodeUserData = 'vscode-userdata';
 
 	export const vscodeCustomEditor = 'vscode-custom-editor';
 
-	export const vscodeNotebook = 'vscode-notebook';
-
 	export const vscodeNotebookCell = 'vscode-notebook-cell';
-
 	export const vscodeNotebookCellMetadata = 'vscode-notebook-cell-metadata';
 	export const vscodeNotebookCellOutput = 'vscode-notebook-cell-output';
-	export const vscodeInteractive = 'vscode-interactive';
 	export const vscodeInteractiveInput = 'vscode-interactive-input';
 
 	export const vscodeSettings = 'vscode-settings';
@@ -70,6 +69,8 @@ export namespace Schemas {
 	export const vscodeWorkspaceTrust = 'vscode-workspace-trust';
 
 	export const vscodeTerminal = 'vscode-terminal';
+
+	export const vscodeChatSesssion = 'vscode-chat-editor';
 
 	/**
 	 * Scheme used internally for webviews that aren't linked to a resource (i.e. not custom editors)
@@ -146,7 +147,12 @@ class RemoteAuthoritiesImpl {
 
 	rewrite(uri: URI): URI {
 		if (this._delegate) {
-			return this._delegate(uri);
+			try {
+				return this._delegate(uri);
+			} catch (err) {
+				errors.onUnexpectedError(err);
+				return uri;
+			}
 		}
 		const authority = uri.authority;
 		let host = this._hosts[authority];

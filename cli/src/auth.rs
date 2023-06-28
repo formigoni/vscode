@@ -5,11 +5,13 @@
 
 use crate::{
 	constants::{get_default_user_agent, PRODUCT_NAME_LONG},
-	info, log,
+	debug, info, log,
 	state::{LauncherPaths, PersistedState},
 	trace,
 	util::{
-		errors::{wrap, AnyError, RefreshTokenNotAvailableError, StatusError, WrappedError},
+		errors::{
+			wrap, AnyError, OAuthError, RefreshTokenNotAvailableError, StatusError, WrappedError,
+		},
 		input::prompt_options,
 	},
 	warning,
@@ -18,7 +20,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use gethostname::gethostname;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{cell::Cell, fmt::Display, path::PathBuf, sync::Arc};
+use std::{cell::Cell, fmt::Display, path::PathBuf, sync::Arc, thread};
 use tokio::time::sleep;
 use tunnels::{
 	contracts::PROD_FIRST_PARTY_APP_ID,
@@ -41,7 +43,13 @@ struct AuthenticationResponse {
 	expires_in: Option<i64>,
 }
 
-#[derive(clap::ArgEnum, Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Deserialize)]
+struct AuthenticationError {
+	error: String,
+	error_description: Option<String>,
+}
+
+#[derive(clap::ValueEnum, Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum AuthProvider {
 	Microsoft,
 	Github,
@@ -104,7 +112,7 @@ pub struct StoredCredential {
 }
 
 impl StoredCredential {
-	pub async fn is_expired(&self, client: &reqwest::Client) -> bool {
+	pub async fn is_expired(&self, log: &log::Logger, client: &reqwest::Client) -> bool {
 		match self.provider {
 			AuthProvider::Microsoft => self
 				.expires_at
@@ -114,14 +122,29 @@ impl StoredCredential {
 			// Make an auth request to Github. Mark the credential as expired
 			// only on a verifiable 4xx code. We don't error on any failed
 			// request since then a drop in connection could "require" a refresh
-			AuthProvider::Github => client
-				.get("https://api.github.com/user")
-				.header("Authorization", format!("token {}", self.access_token))
-				.header("User-Agent", get_default_user_agent())
-				.send()
-				.await
-				.map(|r| r.status().is_client_error())
-				.unwrap_or(false),
+			AuthProvider::Github => {
+				let res = client
+					.get("https://api.github.com/user")
+					.header("Authorization", format!("token {}", self.access_token))
+					.header("User-Agent", get_default_user_agent())
+					.send()
+					.await;
+				let res = match res {
+					Ok(r) => r,
+					Err(e) => {
+						warning!(log, "failed to check Github token: {}", e);
+						return false;
+					}
+				};
+
+				if res.status().is_success() {
+					return false;
+				}
+
+				let err = StatusError::from_res(res).await;
+				debug!(log, "github token looks expired: {:?}", err);
+				true
+			}
 		}
 	}
 
@@ -160,6 +183,9 @@ where
 	T: Serialize + ?Sized,
 {
 	let dec = serde_json::to_string(value).expect("expected to serialize");
+	if std::env::var("VSCODE_CLI_DISABLE_KEYCHAIN_ENCRYPT").is_ok() {
+		return dec;
+	}
 	encrypt(&dec)
 }
 
@@ -168,7 +194,7 @@ fn unseal<T>(value: &str) -> Option<T>
 where
 	T: DeserializeOwned,
 {
-	// small back-compat for old unencrypted values
+	// small back-compat for old unencrypted values, or if VSCODE_CLI_DISABLE_KEYCHAIN_ENCRYPT set
 	if let Ok(v) = serde_json::from_str::<T>(value) {
 		return Some(v);
 	}
@@ -184,6 +210,48 @@ const KEYCHAIN_ENTRY_LIMIT: usize = 128 * 1024;
 
 const CONTINUE_MARKER: &str = "<MORE>";
 
+/// Implementation that wraps the KeyringStorage on Linux to avoid
+/// https://github.com/hwchen/keyring-rs/issues/132
+struct ThreadKeyringStorage {
+	s: Option<KeyringStorage>,
+}
+
+impl ThreadKeyringStorage {
+	fn thread_op<R, Fn>(&mut self, f: Fn) -> R
+	where
+		Fn: 'static + Send + FnOnce(&mut KeyringStorage) -> R,
+		R: 'static + Send,
+	{
+		let mut s = self.s.take().unwrap();
+		let handler = thread::spawn(move || (f(&mut s), s));
+		let (r, s) = handler.join().unwrap();
+		self.s = Some(s);
+		r
+	}
+}
+
+impl Default for ThreadKeyringStorage {
+	fn default() -> Self {
+		Self {
+			s: Some(KeyringStorage::default()),
+		}
+	}
+}
+
+impl StorageImplementation for ThreadKeyringStorage {
+	fn read(&mut self) -> Result<Option<StoredCredential>, WrappedError> {
+		self.thread_op(|s| s.read())
+	}
+
+	fn store(&mut self, value: StoredCredential) -> Result<(), WrappedError> {
+		self.thread_op(move |s| s.store(value))
+	}
+
+	fn clear(&mut self) -> Result<(), WrappedError> {
+		self.thread_op(|s| s.clear())
+	}
+}
+
 #[derive(Default)]
 struct KeyringStorage {
 	// keywring storage can be split into multiple entries due to entry length limits
@@ -196,7 +264,7 @@ macro_rules! get_next_entry {
 		match $self.entries.get($i) {
 			Some(e) => e,
 			None => {
-				let e = keyring::Entry::new("vscode-cli", &format!("vscode-cli-{}", $i));
+				let e = keyring::Entry::new("vscode-cli", &format!("vscode-cli-{}", $i)).unwrap();
 				$self.entries.push(e);
 				$self.entries.last().unwrap()
 			}
@@ -299,7 +367,10 @@ impl Auth {
 			return op(s);
 		}
 
+		#[cfg(not(target_os = "linux"))]
 		let mut keyring_storage = KeyringStorage::default();
+		#[cfg(target_os = "linux")]
+		let mut keyring_storage = ThreadKeyringStorage::default();
 		let mut file_storage = FileStorage(PersistedState::new(self.file_storage_path.clone()));
 
 		let keyring_storage_result = match std::env::var("VSCODE_CLI_USE_FILE_KEYCHAIN") {
@@ -445,7 +516,7 @@ impl Auth {
 		&self,
 		creds: &StoredCredential,
 	) -> Result<Option<StoredCredential>, AnyError> {
-		if !creds.is_expired(&self.client).await {
+		if !creds.is_expired(&self.log, &self.client).await {
 			return Ok(None);
 		}
 
@@ -480,12 +551,26 @@ impl Auth {
 			.send()
 			.await?;
 
-		if !response.status().is_success() {
-			return Err(StatusError::from_res(response).await?.into());
+		let status_code = response.status().as_u16();
+		let body = response.bytes().await?;
+		if let Ok(body) = serde_json::from_slice::<AuthenticationResponse>(&body) {
+			return Ok(StoredCredential::from_response(body, provider));
 		}
 
-		let body = response.json::<AuthenticationResponse>().await?;
-		Ok(StoredCredential::from_response(body, provider))
+		if let Ok(res) = serde_json::from_slice::<AuthenticationError>(&body) {
+			return Err(OAuthError {
+				error: res.error,
+				error_description: res.error_description,
+			}
+			.into());
+		}
+
+		return Err(StatusError {
+			body: String::from_utf8_lossy(&body).to_string(),
+			status_code,
+			url: provider.grant_uri().to_string(),
+		}
+		.into());
 	}
 
 	/// Implements the device code flow, returning the credentials upon success.
@@ -540,16 +625,21 @@ impl Auth {
 			};
 
 			let body = format!(
-                "client_id={}&grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
-                provider.client_id(),
-                init_code_json.device_code
-            );
+					"client_id={}&grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
+					provider.client_id(),
+					init_code_json.device_code
+			);
 
+			let mut interval_s = 5;
 			while Utc::now() < expires_at {
-				sleep(std::time::Duration::from_secs(5)).await;
+				sleep(std::time::Duration::from_secs(interval_s)).await;
 
 				match self.do_grant(provider, body.clone()).await {
 					Ok(creds) => return Ok(creds),
+					Err(AnyError::OAuthError(e)) if e.error == "slow_down" => {
+						interval_s += 5; // https://www.rfc-editor.org/rfc/rfc8628#section-3.5
+						trace!(self.log, "refresh poll failed, slowing down");
+					}
 					Err(e) => {
 						trace!(self.log, "refresh poll failed, retrying: {}", e);
 					}

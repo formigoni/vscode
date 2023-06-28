@@ -68,6 +68,14 @@ export interface IView<TLayoutContext = undefined> {
 	readonly priority?: LayoutPriority;
 
 	/**
+	 * If the {@link SplitView} supports {@link ISplitViewOptions.proportionalLayout proportional layout},
+	 * this property allows for finer control over the proportional layout algorithm, per view.
+	 *
+	 * @defaultValue `true`
+	 */
+	readonly proportionalLayout?: boolean;
+
+	/**
 	 * Whether the view will snap whenever the user reaches its minimum size or
 	 * attempts to grow it beyond the minimum size.
 	 *
@@ -242,6 +250,7 @@ abstract class ViewItem<TLayoutContext> {
 	get viewMaximumSize(): number { return this.view.maximumSize; }
 
 	get priority(): LayoutPriority | undefined { return this.view.priority; }
+	get proportionalLayout(): boolean { return this.view.proportionalLayout ?? true; }
 	get snap(): boolean { return !!this.view.snap; }
 
 	set enabled(enabled: boolean) {
@@ -335,6 +344,12 @@ export type DistributeSizing = { type: 'distribute' };
 export type SplitSizing = { type: 'split'; index: number };
 
 /**
+ * When adding a view, use DistributeSizing when all pre-existing views are
+ * distributed evenly, otherwise use SplitSizing.
+ */
+export type AutoSizing = { type: 'auto'; index: number };
+
+/**
  * When adding or removing views, assume the view is invisible.
  */
 export type InvisibleSizing = { type: 'invisible'; cachedVisibleSize: number };
@@ -343,7 +358,7 @@ export type InvisibleSizing = { type: 'invisible'; cachedVisibleSize: number };
  * When adding or removing views, the sizing provides fine grained
  * control over how other views get resized.
  */
-export type Sizing = DistributeSizing | SplitSizing | InvisibleSizing;
+export type Sizing = DistributeSizing | SplitSizing | AutoSizing | InvisibleSizing;
 
 export namespace Sizing {
 
@@ -358,6 +373,12 @@ export namespace Sizing {
 	 * specific view, indexed by the provided `index`.
 	 */
 	export function Split(index: number): SplitSizing { return { type: 'split', index }; }
+
+	/**
+	 * When adding a view, use DistributeSizing when all pre-existing views are
+	 * distributed evenly, otherwise use SplitSizing.
+	 */
+	export function Auto(index: number): AutoSizing { return { type: 'auto', index }; }
 
 	/**
 	 * When adding or removing views, assume the view is invisible.
@@ -412,7 +433,7 @@ export class SplitView<TLayoutContext = undefined> extends Disposable {
 	private size = 0;
 	private layoutContext: TLayoutContext | undefined;
 	private contentSize = 0;
-	private proportions: undefined | number[] = undefined;
+	private proportions: (number | undefined)[] | undefined = undefined;
 	private viewItems: ViewItem<TLayoutContext>[] = [];
 	sashItems: ISashItem[] = []; // used in tests
 	private sashDragState: ISashDragState | undefined;
@@ -637,6 +658,14 @@ export class SplitView<TLayoutContext = undefined> extends Disposable {
 			throw new Error('Index out of bounds');
 		}
 
+		if (sizing?.type === 'auto') {
+			if (this.areViewsDistributed()) {
+				sizing = { type: 'distribute' };
+			} else {
+				sizing = undefined;
+			}
+		}
+
 		// Remove view
 		const viewItem = this.viewItems.splice(index, 1)[0];
 		const view = viewItem.dispose();
@@ -765,9 +794,26 @@ export class SplitView<TLayoutContext = undefined> extends Disposable {
 
 			this.resize(this.viewItems.length - 1, size - previousSize, undefined, lowPriorityIndexes, highPriorityIndexes);
 		} else {
+			let total = 0;
+
 			for (let i = 0; i < this.viewItems.length; i++) {
 				const item = this.viewItems[i];
-				item.size = clamp(Math.round(this.proportions[i] * size), item.minimumSize, item.maximumSize);
+				const proportion = this.proportions[i];
+
+				if (typeof proportion === 'number') {
+					total += proportion;
+				} else {
+					size -= item.size;
+				}
+			}
+
+			for (let i = 0; i < this.viewItems.length; i++) {
+				const item = this.viewItems[i];
+				const proportion = this.proportions[i];
+
+				if (typeof proportion === 'number') {
+					item.size = clamp(Math.round(proportion * size / total), item.minimumSize, item.maximumSize);
+				}
 			}
 		}
 
@@ -777,7 +823,7 @@ export class SplitView<TLayoutContext = undefined> extends Disposable {
 
 	private saveProportions(): void {
 		if (this.proportionalLayout && this.contentSize > 0) {
-			this.proportions = this.viewItems.map(i => i.size / this.contentSize);
+			this.proportions = this.viewItems.map(i => i.proportionalLayout ? i.size / this.contentSize : undefined);
 		}
 	}
 
@@ -1028,12 +1074,22 @@ export class SplitView<TLayoutContext = undefined> extends Disposable {
 
 		if (typeof size === 'number') {
 			viewSize = size;
-		} else if (size.type === 'split') {
-			viewSize = this.getViewSize(size.index) / 2;
-		} else if (size.type === 'invisible') {
-			viewSize = { cachedVisibleSize: size.cachedVisibleSize };
 		} else {
-			viewSize = view.minimumSize;
+			if (size.type === 'auto') {
+				if (this.areViewsDistributed()) {
+					size = { type: 'distribute' };
+				} else {
+					size = { type: 'split', index: size.index };
+				}
+			}
+
+			if (size.type === 'split') {
+				viewSize = this.getViewSize(size.index) / 2;
+			} else if (size.type === 'invisible') {
+				viewSize = { cachedVisibleSize: size.cachedVisibleSize };
+			} else {
+				viewSize = view.minimumSize;
+			}
 		}
 
 		const item = this.orientation === Orientation.VERTICAL
@@ -1356,13 +1412,30 @@ export class SplitView<TLayoutContext = undefined> extends Disposable {
 		return undefined;
 	}
 
+	private areViewsDistributed() {
+		let min = undefined, max = undefined;
+
+		for (const view of this.viewItems) {
+			min = min === undefined ? view.size : Math.min(min, view.size);
+			max = max === undefined ? view.size : Math.max(max, view.size);
+
+			if (max - min > 2) {
+				return false;
+			}
+		}
+
+		return true;
+	}
+
 	override dispose(): void {
-		super.dispose();
+		this.sashDragState?.disposable.dispose();
 
 		dispose(this.viewItems);
 		this.viewItems = [];
 
 		this.sashItems.forEach(i => i.disposable.dispose());
 		this.sashItems = [];
+
+		super.dispose();
 	}
 }

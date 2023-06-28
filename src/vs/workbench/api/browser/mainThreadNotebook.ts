@@ -44,28 +44,54 @@ export class MainThreadNotebooks implements MainThreadNotebookShape {
 	}
 
 	$registerNotebookSerializer(handle: number, extension: NotebookExtensionDescription, viewType: string, options: TransientOptions, data: INotebookContributionData | undefined): void {
-		const registration = this._notebookService.registerNotebookSerializer(viewType, extension, {
+		const disposables = new DisposableStore();
+
+		disposables.add(this._notebookService.registerNotebookSerializer(viewType, extension, {
 			options,
 			dataToNotebook: async (data: VSBuffer): Promise<NotebookData> => {
-				const sw = new StopWatch(true);
-				const dto = await this._proxy.$dataToNotebook(handle, data, CancellationToken.None);
-				const result = NotebookDto.fromNotebookDataDto(dto.value);
-				this._logService.trace('[NotebookSerializer] dataToNotebook DONE', extension.id, sw.elapsed());
+				const sw = new StopWatch();
+				let result: NotebookData;
+				if (data.byteLength === 0 && viewType === 'interactive') {
+					// we don't want any starting cells for an empty interactive window.
+					result = NotebookDto.fromNotebookDataDto({ cells: [], metadata: {} });
+				} else {
+					const dto = await this._proxy.$dataToNotebook(handle, data, CancellationToken.None);
+					result = NotebookDto.fromNotebookDataDto(dto.value);
+				}
+				this._logService.trace(`[NotebookSerializer] dataToNotebook DONE after ${sw.elapsed()}ms`, {
+					viewType,
+					extensionId: extension.id.value,
+				});
 				return result;
 			},
 			notebookToData: (data: NotebookData): Promise<VSBuffer> => {
-				const sw = new StopWatch(true);
+				const sw = new StopWatch();
 				const result = this._proxy.$notebookToData(handle, new SerializableObjectWithBuffers(NotebookDto.toNotebookDataDto(data)), CancellationToken.None);
-				this._logService.trace('[NotebookSerializer] notebookToData DONE', extension.id, sw.elapsed());
+				this._logService.trace(`[NotebookSerializer] notebookToData DONE after ${sw.elapsed()}`, {
+					viewType,
+					extensionId: extension.id.value,
+				});
 				return result;
-			}
-		});
-		const disposables = new DisposableStore();
-		disposables.add(registration);
+			},
+			save: async (uri, versionId, options, token) => {
+				const stat = await this._proxy.$saveNotebook(handle, uri, versionId, options, token);
+				return {
+					...stat,
+					children: undefined,
+					resource: uri
+				};
+			},
+		}));
+
 		if (data) {
 			disposables.add(this._notebookService.registerContributedNotebookType(viewType, data));
 		}
 		this._notebookSerializer.set(handle, disposables);
+
+		this._logService.trace('[NotebookSerializer] registered notebook serializer', {
+			viewType,
+			extensionId: extension.id.value,
+		});
 	}
 
 	$unregisterNotebookSerializer(handle: number): void {

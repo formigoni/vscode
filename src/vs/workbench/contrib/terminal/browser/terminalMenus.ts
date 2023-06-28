@@ -517,7 +517,49 @@ export function setupTerminalMenus(): void {
 						ContextKeyExpr.or(TerminalContextKeys.webExtensionContributedProfile, TerminalContextKeys.processSupported)
 					)
 				}
-			}
+			},
+			{
+				id: MenuId.ViewTitle,
+				item: {
+					command: {
+						id: TerminalCommandId.Clear,
+						title: localize('workbench.action.terminal.clearLong', "Clear Terminal"),
+						icon: Codicon.clearAll
+					},
+					group: 'navigation',
+					order: 4,
+					when: ContextKeyExpr.equals('view', TERMINAL_VIEW_ID),
+					isHiddenByDefault: true
+				}
+			},
+			{
+				id: MenuId.ViewTitle,
+				item: {
+					command: {
+						id: TerminalCommandId.RunActiveFile,
+						title: localize('workbench.action.terminal.runActiveFile', "Run Active File"),
+						icon: Codicon.run
+					},
+					group: 'navigation',
+					order: 5,
+					when: ContextKeyExpr.equals('view', TERMINAL_VIEW_ID),
+					isHiddenByDefault: true
+				}
+			},
+			{
+				id: MenuId.ViewTitle,
+				item: {
+					command: {
+						id: TerminalCommandId.RunSelectedText,
+						title: localize('workbench.action.terminal.runSelectedText', "Run Selected Text"),
+						icon: Codicon.selection
+					},
+					group: 'navigation',
+					order: 6,
+					when: ContextKeyExpr.equals('view', TERMINAL_VIEW_ID),
+					isHiddenByDefault: true
+				}
+			},
 		]
 	);
 
@@ -743,7 +785,7 @@ export function setupTerminalMenus(): void {
 
 	MenuRegistry.appendMenuItem(MenuId.EditorTitle, {
 		command: {
-			id: TerminalCommandId.CreateTerminalEditor,
+			id: TerminalCommandId.CreateTerminalEditorSameGroup,
 			title: terminalStrings.new,
 			icon: Codicon.plus
 		},

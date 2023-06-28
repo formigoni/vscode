@@ -8,15 +8,33 @@ import { URI } from 'vs/base/common/uri';
 import { localize } from 'vs/nls';
 import { IInstantiationService } from 'vs/platform/instantiation/common/instantiation';
 import { ILogService } from 'vs/platform/log/common/log';
-import { IStorageService, StorageScope, StorageTarget } from 'vs/platform/storage/common/storage';
+import { IStorageEntry, IStorageService, StorageScope, StorageTarget } from 'vs/platform/storage/common/storage';
 import { IUserDataProfile } from 'vs/platform/userDataProfile/common/userDataProfile';
 import { IUserDataProfileStorageService } from 'vs/platform/userDataProfile/common/userDataProfileStorageService';
 import { API_OPEN_EDITOR_COMMAND_ID } from 'vs/workbench/browser/parts/editor/editorCommands';
 import { ITreeItemCheckboxState, TreeItemCollapsibleState } from 'vs/workbench/common/views';
-import { IProfileResource, IProfileResourceTreeItem, ProfileResourceType } from 'vs/workbench/services/userDataProfile/common/userDataProfile';
+import { IProfileResource, IProfileResourceChildTreeItem, IProfileResourceInitializer, IProfileResourceTreeItem, ProfileResourceType } from 'vs/workbench/services/userDataProfile/common/userDataProfile';
 
 interface IGlobalState {
 	storage: IStringDictionary<string>;
+}
+
+export class GlobalStateResourceInitializer implements IProfileResourceInitializer {
+
+	constructor(@IStorageService private readonly storageService: IStorageService) {
+	}
+
+	async initialize(content: string): Promise<void> {
+		const globalState: IGlobalState = JSON.parse(content);
+		const storageKeys = Object.keys(globalState.storage);
+		if (storageKeys.length) {
+			const storageEntries: Array<IStorageEntry> = [];
+			for (const key of storageKeys) {
+				storageEntries.push({ key, value: globalState.storage[key], scope: StorageScope.PROFILE, target: StorageTarget.USER });
+			}
+			this.storageService.storeAll(storageEntries, true);
+		}
+	}
 }
 
 export class GlobalStateResource implements IProfileResource {
@@ -61,7 +79,7 @@ export class GlobalStateResource implements IProfileResource {
 			];
 			for (const key of storageKeys) {
 				if (nonProfileKeys.includes(key)) {
-					this.logService.info(`Profile: Ignoring global state key '${key}' because it is not a profile key.`);
+					this.logService.info(`Importing Profile (${profile.name}): Ignoring global state key '${key}' because it is not a profile key.`);
 				} else {
 					updatedStorage.set(key, globalState.storage[key]);
 				}
@@ -74,19 +92,26 @@ export class GlobalStateResource implements IProfileResource {
 export abstract class GlobalStateResourceTreeItem implements IProfileResourceTreeItem {
 
 	readonly type = ProfileResourceType.GlobalState;
-	readonly handle = 'globalState';
+	readonly handle = ProfileResourceType.GlobalState;
 	readonly label = { label: localize('globalState', "UI State") };
-	readonly collapsibleState = TreeItemCollapsibleState.None;
-	checkbox: ITreeItemCheckboxState = { isChecked: true };
-	readonly command = {
-		id: API_OPEN_EDITOR_COMMAND_ID,
-		title: '',
-		arguments: [this.resource, undefined, undefined]
-	};
+	readonly collapsibleState = TreeItemCollapsibleState.Collapsed;
+	checkbox: ITreeItemCheckboxState | undefined;
 
 	constructor(private readonly resource: URI) { }
 
-	async getChildren(): Promise<undefined> { return undefined; }
+	async getChildren(): Promise<IProfileResourceChildTreeItem[]> {
+		return [{
+			handle: this.resource.toString(),
+			resourceUri: this.resource,
+			collapsibleState: TreeItemCollapsibleState.None,
+			parent: this,
+			command: {
+				id: API_OPEN_EDITOR_COMMAND_ID,
+				title: '',
+				arguments: [this.resource, undefined, undefined]
+			}
+		}];
+	}
 
 	abstract getContent(): Promise<string>;
 }
