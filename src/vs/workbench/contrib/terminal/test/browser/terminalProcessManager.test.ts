@@ -4,21 +4,22 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { strictEqual } from 'assert';
-import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
-import { TerminalConfigHelper } from 'vs/workbench/contrib/terminal/browser/terminalConfigHelper';
-import { TerminalProcessManager } from 'vs/workbench/contrib/terminal/browser/terminalProcessManager';
-import { TestConfigurationService } from 'vs/platform/configuration/test/common/testConfigurationService';
-import { ITestInstantiationService, TestTerminalProfileResolverService, workbenchInstantiationService } from 'vs/workbench/test/browser/workbenchTestServices';
-import { IProductService } from 'vs/platform/product/common/productService';
-import { IEnvironmentVariableService } from 'vs/workbench/contrib/terminal/common/environmentVariable';
-import { EnvironmentVariableService } from 'vs/workbench/contrib/terminal/common/environmentVariableService';
+import { Event } from 'vs/base/common/event';
 import { Schemas } from 'vs/base/common/network';
 import { URI } from 'vs/base/common/uri';
-import { ITerminalChildProcess } from 'vs/platform/terminal/common/terminal';
+import { ensureNoDisposablesAreLeakedInTestSuite } from 'vs/base/test/common/utils';
+import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
+import { TestConfigurationService } from 'vs/platform/configuration/test/common/testConfigurationService';
+import { NullLogService } from 'vs/platform/log/common/log';
+import { IProductService } from 'vs/platform/product/common/productService';
+import { ITerminalChildProcess, ITerminalLogService } from 'vs/platform/terminal/common/terminal';
+import { ITerminalConfigurationService, ITerminalInstanceService } from 'vs/workbench/contrib/terminal/browser/terminal';
+import { TerminalConfigurationService } from 'vs/workbench/contrib/terminal/browser/terminalConfigurationService';
+import { TerminalProcessManager } from 'vs/workbench/contrib/terminal/browser/terminalProcessManager';
+import { IEnvironmentVariableService } from 'vs/workbench/contrib/terminal/common/environmentVariable';
+import { EnvironmentVariableService } from 'vs/workbench/contrib/terminal/common/environmentVariableService';
 import { ITerminalProfileResolverService } from 'vs/workbench/contrib/terminal/common/terminal';
-import { ITerminalInstanceService } from 'vs/workbench/contrib/terminal/browser/terminal';
-import { DisposableStore } from 'vs/base/common/lifecycle';
-import { Event } from 'vs/base/common/event';
+import { TestTerminalProfileResolverService, workbenchInstantiationService } from 'vs/workbench/test/browser/workbenchTestServices';
 import { TestProductService } from 'vs/workbench/test/common/workbenchTestServices';
 
 class TestTerminalChildProcess implements ITerminalChildProcess {
@@ -51,7 +52,6 @@ class TestTerminalChildProcess implements ITerminalChildProcess {
 	async setUnicodeVersion(version: '6' | '11'): Promise<void> { }
 	async getInitialCwd(): Promise<string> { return ''; }
 	async getCwd(): Promise<string> { return ''; }
-	async getLatency(): Promise<number> { return 0; }
 	async processBinary(data: string): Promise<void> { }
 	refreshProperty(property: any): Promise<any> { return Promise.resolve(''); }
 }
@@ -74,19 +74,19 @@ class TestTerminalInstanceService implements Partial<ITerminalInstanceService> {
 				env: any,
 				windowsEnableConpty: boolean,
 				shouldPersist: boolean
-			) => new TestTerminalChildProcess(shouldPersist)
+			) => new TestTerminalChildProcess(shouldPersist),
+			getLatency: () => Promise.resolve([])
 		} as any;
 	}
 }
 
 suite('Workbench - TerminalProcessManager', () => {
-	let disposables: DisposableStore;
-	let instantiationService: ITestInstantiationService;
 	let manager: TerminalProcessManager;
 
+	const store = ensureNoDisposablesAreLeakedInTestSuite();
+
 	setup(async () => {
-		disposables = new DisposableStore();
-		instantiationService = workbenchInstantiationService(undefined, disposables);
+		const instantiationService = workbenchInstantiationService(undefined, store);
 		const configurationService = new TestConfigurationService();
 		await configurationService.setUserConfiguration('editor', { fontFamily: 'foo' });
 		await configurationService.setUserConfiguration('terminal', {
@@ -99,17 +99,14 @@ suite('Workbench - TerminalProcessManager', () => {
 			}
 		});
 		instantiationService.stub(IConfigurationService, configurationService);
+		instantiationService.stub(ITerminalConfigurationService, store.add(instantiationService.createInstance(TerminalConfigurationService)));
 		instantiationService.stub(IProductService, TestProductService);
-		instantiationService.stub(IEnvironmentVariableService, instantiationService.createInstance(EnvironmentVariableService));
+		instantiationService.stub(ITerminalLogService, new NullLogService());
+		instantiationService.stub(IEnvironmentVariableService, store.add(instantiationService.createInstance(EnvironmentVariableService)));
 		instantiationService.stub(ITerminalProfileResolverService, TestTerminalProfileResolverService);
 		instantiationService.stub(ITerminalInstanceService, new TestTerminalInstanceService());
 
-		const configHelper = instantiationService.createInstance(TerminalConfigHelper);
-		manager = instantiationService.createInstance(TerminalProcessManager, 1, configHelper, undefined, undefined, undefined);
-	});
-
-	teardown(() => {
-		disposables.dispose();
+		manager = store.add(instantiationService.createInstance(TerminalProcessManager, 1, undefined, undefined, undefined));
 	});
 
 	suite('process persistence', () => {

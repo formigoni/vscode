@@ -15,26 +15,21 @@ import { IConfigurationService } from 'vs/platform/configuration/common/configur
 import { TestConfigurationService } from 'vs/platform/configuration/test/common/testConfigurationService';
 import { IWorkbenchEnvironmentService } from 'vs/workbench/services/environment/common/environmentService';
 import { TestEnvironmentService } from 'vs/workbench/test/browser/workbenchTestServices';
+import { ensureNoDisposablesAreLeakedInTestSuite } from 'vs/base/test/common/utils';
 
 suite('Workbench - TerminalInstanceService', () => {
-	let instantiationService: TestInstantiationService;
 	let terminalInstanceService: ITerminalInstanceService;
 
 	setup(async () => {
-		instantiationService = new TestInstantiationService();
-		// TODO: Should be able to create these services without this config set
-		instantiationService.stub(IConfigurationService, new TestConfigurationService({
-			terminal: {
-				integrated: {
-					fontWeight: 'normal'
-				}
-			}
-		}));
+		const instantiationService = new TestInstantiationService();
+		instantiationService.stub(IConfigurationService, new TestConfigurationService());
 		instantiationService.stub(IContextKeyService, instantiationService.createInstance(ContextKeyService));
 		instantiationService.stub(IWorkbenchEnvironmentService, TestEnvironmentService);
 
 		terminalInstanceService = instantiationService.createInstance(TerminalInstanceService);
 	});
+
+	ensureNoDisposablesAreLeakedInTestSuite();
 
 	suite('convertProfileToShellLaunchConfig', () => {
 		test('should return an empty shell launch config when undefined is provided', () => {

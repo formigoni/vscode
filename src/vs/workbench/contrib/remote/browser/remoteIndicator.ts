@@ -4,12 +4,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as nls from 'vs/nls';
-import { STATUS_BAR_HOST_NAME_BACKGROUND, STATUS_BAR_HOST_NAME_FOREGROUND } from 'vs/workbench/common/theme';
-import { themeColorFromId } from 'vs/platform/theme/common/themeService';
 import { IRemoteAgentService, remoteConnectionLatencyMeasurer } from 'vs/workbench/services/remote/common/remoteAgentService';
 import { RunOnceScheduler, retry } from 'vs/base/common/async';
-import { Event } from 'vs/base/common/event';
-import { Disposable, dispose } from 'vs/base/common/lifecycle';
+import { Emitter, Event } from 'vs/base/common/event';
+import { Disposable } from 'vs/base/common/lifecycle';
 import { MenuId, IMenuService, MenuItemAction, MenuRegistry, registerAction2, Action2, SubmenuItemAction } from 'vs/platform/actions/common/actions';
 import { IWorkbenchContribution } from 'vs/workbench/common/contributions';
 import { StatusbarAlignment, IStatusbarService, IStatusbarEntryAccessor, IStatusbarEntry } from 'vs/workbench/services/statusbar/browser/statusbar';
@@ -24,7 +22,6 @@ import { PersistentConnectionEventType } from 'vs/platform/remote/common/remoteA
 import { IRemoteAuthorityResolverService } from 'vs/platform/remote/common/remoteAuthorityResolver';
 import { IHostService } from 'vs/workbench/services/host/browser/host';
 import { PlatformName, PlatformToString, isWeb, platform } from 'vs/base/common/platform';
-import { once } from 'vs/base/common/functional';
 import { truncate } from 'vs/base/common/strings';
 import { IWorkspaceContextService } from 'vs/platform/workspace/common/workspace';
 import { getRemoteName } from 'vs/platform/remote/common/remoteHosts';
@@ -45,27 +42,17 @@ import { KeybindingWeight } from 'vs/platform/keybinding/common/keybindingsRegis
 import { KeyCode, KeyMod } from 'vs/base/common/keyCodes';
 import { IProductService } from 'vs/platform/product/common/productService';
 import { DomEmitter } from 'vs/base/browser/event';
-import { registerColor } from 'vs/platform/theme/common/colorRegistry';
 import { ExtensionIdentifier } from 'vs/platform/extensions/common/extensions';
-import { CancellationToken, CancellationTokenSource } from 'vs/base/common/cancellation';
+import { CancellationToken } from 'vs/base/common/cancellation';
 import { ThemeIcon } from 'vs/base/common/themables';
 import { infoIcon } from 'vs/workbench/contrib/extensions/browser/extensionsIcons';
 import { IOpenerService } from 'vs/platform/opener/common/opener';
 import { URI } from 'vs/base/common/uri';
-
-export const STATUS_BAR_OFFLINE_BACKGROUND = registerColor('statusBar.offlineBackground', {
-	dark: '#6c1717',
-	light: '#6c1717',
-	hcDark: '#6c1717',
-	hcLight: '#6c1717'
-}, nls.localize('statusBarOfflineBackground', "Status bar background color when the workbench is offline. The status bar is shown in the bottom of the window"));
-
-export const STATUS_BAR_OFFLINE_FOREGROUND = registerColor('statusBar.offlineForeground', {
-	dark: STATUS_BAR_HOST_NAME_FOREGROUND,
-	light: STATUS_BAR_HOST_NAME_FOREGROUND,
-	hcDark: STATUS_BAR_HOST_NAME_FOREGROUND,
-	hcLight: STATUS_BAR_HOST_NAME_FOREGROUND
-}, nls.localize('statusBarOfflineForeground', "Status bar foreground color when the workbench is offline. The status bar is shown in the bottom of the window"));
+import { mainWindow } from 'vs/base/browser/window';
+import { Registry } from 'vs/platform/registry/common/platform';
+import { IConfigurationRegistry, Extensions as ConfigurationExtensions } from 'vs/platform/configuration/common/configurationRegistry';
+import { workbenchConfigurationNodeBase } from 'vs/workbench/common/configuration';
+import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 
 type ActionGroup = [string, Array<MenuItemAction | SubmenuItemAction>];
 
@@ -81,8 +68,9 @@ interface RemoteExtensionMetadata {
 	supportedPlatforms?: PlatformName[];
 }
 
-export const showRemoteStartEntry = new RawContextKey<boolean>('showRemoteStartEntry', false);
 export class RemoteStatusIndicator extends Disposable implements IWorkbenchContribution {
+
+	static readonly ID = 'workbench.contrib.remoteStatusIndicator';
 
 	private static readonly REMOTE_ACTIONS_COMMAND_ID = 'workbench.action.remote.showMenu';
 	private static readonly CLOSE_REMOTE_COMMAND_ID = 'workbench.action.remote.close';
@@ -113,8 +101,36 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 	private measureNetworkConnectionLatencyScheduler: RunOnceScheduler | undefined = undefined;
 
 	private loggedInvalidGroupNames: { [group: string]: boolean } = Object.create(null);
-	private readonly remoteExtensionMetadata: RemoteExtensionMetadata[];
+
+	private _remoteExtensionMetadata: RemoteExtensionMetadata[] | undefined = undefined;
+	private get remoteExtensionMetadata(): RemoteExtensionMetadata[] {
+		if (!this._remoteExtensionMetadata) {
+			const remoteExtensionTips = { ...this.productService.remoteExtensionTips, ...this.productService.virtualWorkspaceExtensionTips };
+			this._remoteExtensionMetadata = Object.values(remoteExtensionTips).filter(value => value.startEntry !== undefined).map(value => {
+				return {
+					id: value.extensionId,
+					installed: false,
+					friendlyName: value.friendlyName,
+					isPlatformCompatible: false,
+					dependencies: [],
+					helpLink: value.startEntry?.helpLink ?? '',
+					startConnectLabel: value.startEntry?.startConnectLabel ?? '',
+					startCommand: value.startEntry?.startCommand ?? '',
+					priority: value.startEntry?.priority ?? 10,
+					supportedPlatforms: value.supportedPlatforms
+				};
+			});
+
+			this.remoteExtensionMetadata.sort((ext1, ext2) => ext1.priority - ext2.priority);
+		}
+
+		return this._remoteExtensionMetadata;
+	}
+
 	private remoteMetadataInitialized: boolean = false;
+	private readonly _onDidChangeEntries = this._register(new Emitter<void>());
+	private readonly onDidChangeEntries: Event<void> = this._onDidChangeEntries.event;
+
 	constructor(
 		@IStatusbarService private readonly statusbarService: IStatusbarService,
 		@IBrowserWorkbenchEnvironmentService private readonly environmentService: IBrowserWorkbenchEnvironmentService,
@@ -134,26 +150,9 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 		@IProductService private readonly productService: IProductService,
 		@IExtensionManagementService private readonly extensionManagementService: IExtensionManagementService,
 		@IOpenerService private readonly openerService: IOpenerService,
+		@IConfigurationService private readonly configurationService: IConfigurationService,
 	) {
 		super();
-
-		const remoteExtensionTips = { ...this.productService.remoteExtensionTips, ...this.productService.virtualWorkspaceExtensionTips };
-		this.remoteExtensionMetadata = Object.values(remoteExtensionTips).filter(value => value.startEntry !== undefined).map(value => {
-			return {
-				id: value.extensionId,
-				installed: false,
-				friendlyName: value.friendlyName,
-				isPlatformCompatible: false,
-				dependencies: [],
-				helpLink: value.startEntry?.helpLink ?? '',
-				startConnectLabel: value.startEntry?.startConnectLabel ?? '',
-				startCommand: value.startEntry?.startCommand ?? '',
-				priority: value.startEntry?.priority ?? 10,
-				supportedPlatforms: value.supportedPlatforms
-			};
-		});
-
-		this.remoteExtensionMetadata.sort((ext1, ext2) => ext1.priority - ext2.priority);
 
 		// Set initial connection state
 		if (this.remoteAuthority) {
@@ -171,16 +170,16 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 	}
 
 	private registerActions(): void {
-		const category = { value: nls.localize('remote.category', "Remote"), original: 'Remote' };
+		const category = nls.localize2('remote.category', "Remote");
 
 		// Show Remote Menu
 		const that = this;
-		registerAction2(class extends Action2 {
+		this._register(registerAction2(class extends Action2 {
 			constructor() {
 				super({
 					id: RemoteStatusIndicator.REMOTE_ACTIONS_COMMAND_ID,
 					category,
-					title: { value: nls.localize('remote.showMenu', "Show Remote Menu"), original: 'Show Remote Menu' },
+					title: nls.localize2('remote.showMenu', "Show Remote Menu"),
 					f1: true,
 					keybinding: {
 						weight: KeybindingWeight.WorkbenchContrib,
@@ -189,22 +188,22 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 				});
 			}
 			run = () => that.showRemoteMenu();
-		});
+		}));
 
 		// Close Remote Connection
 		if (RemoteStatusIndicator.SHOW_CLOSE_REMOTE_COMMAND_ID) {
-			registerAction2(class extends Action2 {
+			this._register(registerAction2(class extends Action2 {
 				constructor() {
 					super({
 						id: RemoteStatusIndicator.CLOSE_REMOTE_COMMAND_ID,
 						category,
-						title: { value: nls.localize('remote.close', "Close Remote Connection"), original: 'Close Remote Connection' },
+						title: nls.localize2('remote.close', "Close Remote Connection"),
 						f1: true,
 						precondition: ContextKeyExpr.or(RemoteNameContext, VirtualWorkspaceContext)
 					});
 				}
 				run = () => that.hostService.openWindow({ forceReuseWindow: true, remoteAuthority: null });
-			});
+			}));
 			if (this.remoteAuthority) {
 				MenuRegistry.appendMenuItem(MenuId.MenubarFileMenu, {
 					group: '6_close',
@@ -218,12 +217,12 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 		}
 
 		if (this.extensionGalleryService.isEnabled()) {
-			registerAction2(class extends Action2 {
+			this._register(registerAction2(class extends Action2 {
 				constructor() {
 					super({
 						id: RemoteStatusIndicator.INSTALL_REMOTE_EXTENSIONS_ID,
 						category,
-						title: { value: nls.localize('remote.install', "Install Remote Development Extensions"), original: 'Install Remote Development Extensions' },
+						title: nls.localize2('remote.install', "Install Remote Development Extensions"),
 						f1: true
 					});
 				}
@@ -236,7 +235,7 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 						}
 					});
 				};
-			});
+			}));
 		}
 	}
 
@@ -290,8 +289,8 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 		// Online / Offline changes (web only)
 		if (isWeb) {
 			this._register(Event.any(
-				this._register(new DomEmitter(window, 'online')).event,
-				this._register(new DomEmitter(window, 'offline')).event
+				this._register(new DomEmitter(mainWindow, 'online')).event,
+				this._register(new DomEmitter(mainWindow, 'offline')).event
 			)(() => this.setNetworkState(navigator.onLine ? 'online' : 'offline')));
 		}
 
@@ -322,26 +321,22 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 		for (let i = 0; i < this.remoteExtensionMetadata.length; i++) {
 			const extensionId = this.remoteExtensionMetadata[i].id;
 			const supportedPlatforms = this.remoteExtensionMetadata[i].supportedPlatforms;
-			// Update compatibility
-			const token = new CancellationTokenSource();
-			const galleryExtension = (await this.extensionGalleryService.getExtensions([{ id: extensionId }], token.token))[0];
-			if (!await this.extensionManagementService.canInstall(galleryExtension)) {
-				this.remoteExtensionMetadata[i].isPlatformCompatible = false;
+			const isInstalled = (await this.extensionManagementService.getInstalled()).find(value => ExtensionIdentifier.equals(value.identifier.id, extensionId)) ? true : false;
+
+			this.remoteExtensionMetadata[i].installed = isInstalled;
+			if (isInstalled) {
+				this.remoteExtensionMetadata[i].isPlatformCompatible = true;
 			}
 			else if (supportedPlatforms && !supportedPlatforms.includes(currentPlatform)) {
 				this.remoteExtensionMetadata[i].isPlatformCompatible = false;
 			}
 			else {
 				this.remoteExtensionMetadata[i].isPlatformCompatible = true;
-				this.remoteExtensionMetadata[i].dependencies = galleryExtension.properties.extensionPack ?? [];
 			}
-
-			// Check if installed and enabled
-			this.remoteExtensionMetadata[i].installed = (await this.extensionManagementService.getInstalled()).find(value => ExtensionIdentifier.equals(value.identifier.id, extensionId)) ? true : false;
 		}
 
 		this.remoteMetadataInitialized = true;
-		showRemoteStartEntry.bindTo(this.contextKeyService).set(true);
+		this._onDidChangeEntries.fire();
 		this.updateRemoteStatusIndicator();
 	}
 
@@ -551,15 +546,8 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 			}
 		}
 
-		// Show when there are commands or installable remote extensions.
-		if (this.hasRemoteMenuCommands(true) || this.remoteExtensionMetadata.some(ext => !ext.installed && ext.isPlatformCompatible)) {
-			this.renderRemoteStatusIndicator(`$(remote)`, nls.localize('noHost.tooltip', "Open a Remote Window"));
-			return;
-		}
-
-		// No Remote Extensions: hide status indicator
-		dispose(this.remoteStatusEntry);
-		this.remoteStatusEntry = undefined;
+		this.renderRemoteStatusIndicator(`$(remote)`, nls.localize('noHost.tooltip', "Open a Remote Window"));
+		return;
 	}
 
 	private renderRemoteStatusIndicator(initialText: string, initialTooltip?: string | MarkdownString, command?: string, showProgress?: boolean): void {
@@ -567,13 +555,12 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 
 		const properties: IStatusbarEntry = {
 			name: nls.localize('remoteHost', "Remote Host"),
-			backgroundColor: themeColorFromId(this.networkState === 'offline' ? STATUS_BAR_OFFLINE_BACKGROUND : STATUS_BAR_HOST_NAME_BACKGROUND),
-			color: themeColorFromId(this.networkState === 'offline' ? STATUS_BAR_OFFLINE_FOREGROUND : STATUS_BAR_HOST_NAME_FOREGROUND),
+			kind: this.networkState === 'offline' ? 'offline' : 'remote',
 			ariaLabel,
 			text,
 			showProgress,
 			tooltip,
-			command: command ?? (this.hasRemoteMenuCommands(false) || this.remoteExtensionMetadata.some(ext => !ext.installed && ext.isPlatformCompatible)) ? RemoteStatusIndicator.REMOTE_ACTIONS_COMMAND_ID : undefined
+			command: command ?? RemoteStatusIndicator.REMOTE_ACTIONS_COMMAND_ID
 		};
 
 		if (this.remoteStatusEntry) {
@@ -732,6 +719,28 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 				}
 			}
 
+			const showExtensionRecommendations = this.configurationService.getValue<boolean>('workbench.remoteIndicator.showExtensionRecommendations');
+			if (showExtensionRecommendations && this.extensionGalleryService.isEnabled() && this.remoteMetadataInitialized) {
+
+				const notInstalledItems: QuickPickItem[] = [];
+				for (const metadata of this.remoteExtensionMetadata) {
+					if (!metadata.installed && metadata.isPlatformCompatible) {
+						// Create Install QuickPick with a help link
+						const label = metadata.startConnectLabel;
+						const buttons: IQuickInputButton[] = [{
+							iconClass: ThemeIcon.asClassName(infoIcon),
+							tooltip: nls.localize('remote.startActions.help', "Learn More")
+						}];
+						notInstalledItems.push({ type: 'item', id: metadata.id, label: label, buttons: buttons });
+					}
+				}
+
+				items.push({
+					type: 'separator', label: nls.localize('remote.startActions.install', 'Install')
+				});
+				items.push(...notInstalledItems);
+			}
+
 			items.push({
 				type: 'separator'
 			});
@@ -766,27 +775,6 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 				items.pop(); // remove the separator again
 			}
 
-			if (this.extensionGalleryService.isEnabled() && this.remoteMetadataInitialized) {
-
-				const notInstalledItems: QuickPickItem[] = [];
-				for (const metadata of this.remoteExtensionMetadata) {
-					if (!metadata.installed && metadata.isPlatformCompatible) {
-						// Create Install QuickPick with a help link
-						const label = metadata.startConnectLabel;
-						const buttons: IQuickInputButton[] = [{
-							iconClass: ThemeIcon.asClassName(infoIcon),
-							tooltip: nls.localize('remote.startActions.help', "Learn More")
-						}];
-						notInstalledItems.push({ type: 'item', id: metadata.id, label: label, buttons: buttons });
-					}
-				}
-
-				items.push({
-					type: 'separator', label: nls.localize('remote.startActions.install', 'Install')
-				});
-				items.push(...notInstalledItems);
-			}
-
 			return items;
 		};
 
@@ -795,7 +783,7 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 		quickPick.items = computeItems();
 		quickPick.sortByLabel = false;
 		quickPick.canSelectMany = false;
-		once(quickPick.onDidAccept)((async _ => {
+		Event.once(quickPick.onDidAccept)((async _ => {
 			const selectedItems = quickPick.selectedItems;
 			if (selectedItems.length === 1) {
 				const commandId = selectedItems[0].id!;
@@ -820,7 +808,7 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 			}
 		}));
 
-		once(quickPick.onDidTriggerItemButton)(async (e) => {
+		Event.once(quickPick.onDidTriggerItemButton)(async (e) => {
 			const remoteExtension = this.remoteExtensionMetadata.find(value => ExtensionIdentifier.equals(value.id, e.item.id));
 			if (remoteExtension) {
 				await this.openerService.open(URI.parse(remoteExtension.helpLink));
@@ -834,17 +822,27 @@ export class RemoteStatusIndicator extends Disposable implements IWorkbenchContr
 		const itemUpdater = this.remoteIndicatorMenu.onDidChange(() => quickPick.items = computeItems());
 		quickPick.onDidHide(itemUpdater.dispose);
 
+		if (!this.remoteMetadataInitialized) {
+			quickPick.busy = true;
+			this._register(this.onDidChangeEntries(() => {
+				// If quick pick is open, update the quick pick items after initialization.
+				quickPick.busy = false;
+				quickPick.items = computeItems();
+			}));
+		}
+
 		quickPick.show();
 	}
-
-	private hasRemoteMenuCommands(ignoreInstallAdditional: boolean): boolean {
-		if (this.remoteAuthority !== undefined || this.virtualWorkspaceLocation !== undefined) {
-			if (RemoteStatusIndicator.SHOW_CLOSE_REMOTE_COMMAND_ID) {
-				return true;
-			}
-		} else if (!ignoreInstallAdditional && this.extensionGalleryService.isEnabled()) {
-			return true;
-		}
-		return this.getRemoteMenuActions().length > 0;
-	}
 }
+
+Registry.as<IConfigurationRegistry>(ConfigurationExtensions.Configuration)
+	.registerConfiguration({
+		...workbenchConfigurationNodeBase,
+		properties: {
+			'workbench.remoteIndicator.showExtensionRecommendations': {
+				type: 'boolean',
+				markdownDescription: nls.localize('remote.showExtensionRecommendations', "When enabled, remote extensions recommendations will be shown in the Remote Indicator menu."),
+				default: true
+			},
+		}
+	});

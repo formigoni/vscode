@@ -218,7 +218,7 @@ export async function startServer(connection: Connection, serverConfig: {
 			const action: lsp.CodeAction = {
 				title: l10n.t("Organize link definitions"),
 				kind: organizeLinkDefKind,
-				data: <OrganizeLinkActionData>{ uri: document.uri }
+				data: { uri: document.uri } satisfies OrganizeLinkActionData,
 			};
 			return [action];
 		}
@@ -260,6 +260,26 @@ export async function startServer(connection: Connection, serverConfig: {
 			edit: result.edit,
 			participatingRenames: result.participatingRenames.map(rename => ({ oldUri: rename.oldUri.toString(), newUri: rename.newUri.toString() }))
 		};
+	}));
+
+	connection.onRequest(protocol.prepareUpdatePastedLinks, (async (params, token: CancellationToken) => {
+		const document = documents.get(params.uri);
+		if (!document) {
+			return undefined;
+		}
+
+		return mdLs!.prepareUpdatePastedLinks(document, params.ranges, token);
+	}));
+
+	connection.onRequest(protocol.getUpdatePastedLinksEdit, (async (params, token: CancellationToken) => {
+		const document = documents.get(params.pasteIntoDoc);
+		if (!document) {
+			return undefined;
+		}
+
+		// TODO: Figure out why range types are lying
+		const edits = params.edits.map((edit: any) => lsp.TextEdit.replace(lsp.Range.create(edit.range[0].line, edit.range[0].character, edit.range[1].line, edit.range[1].character), edit.newText));
+		return mdLs!.getUpdatePastedLinksEdit(document, edits, params.metadata, token);
 	}));
 
 	connection.onRequest(protocol.resolveLinkTarget, (async (params, token: CancellationToken) => {
